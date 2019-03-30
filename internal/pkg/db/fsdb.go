@@ -12,8 +12,8 @@ import (
 var ddl = []string{
 	"CREATE TABLE IF NOT EXISTS tag(id INTEGER PRIMARY KEY, txt text);",
 	"CREATE TABLE IF NOT EXISTS file(id INTEGER PRIMARY KEY, name text, path text, created INTEGER, modified INTEGER, backed_up INTEGER);",
-	"CREATE TABLE IF NOT EXISTS file_tags(id INTEGER PRIMARY KEY, fid INTEGER, tid INTEGER);",
-	"CREATE TABLE IF NOT EXISTS tag_assoc(id, INTEGER PRIMARY KEY, t1 INTEGER, t2 INTEGER);",
+	"CREATE TABLE IF NOT EXISTS file_tags(fid INTEGER, tid INTEGER, PRIMARY KEY (fid,tid));",
+	"CREATE TABLE IF NOT EXISTS tag_assoc(t1 INTEGER, t2 INTEGER, PRIMARY KEY (t1,t2));",
 	"CREATE UNIQUE INDEX IF NOT EXISTS tag_idx ON tag(txt);"}
 
 //Opens the database and creates the schema if it is not present.
@@ -33,16 +33,16 @@ func Open(filename string) (*sql.DB, error) {
 }
 
 //Lists all tags in the database.
-func GetAllTags(db *sql.DB) ([]string, error) {
-	rows, err := db.Query("select txt from tag order by txt DESC")
+func GetAllTags(db *sql.DB) ([]metadata.TagInfo, error) {
+	rows, err := db.Query("select id, txt from tag order by txt DESC")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var results []string
+	var results []metadata.TagInfo
 	for rows.Next() {
-		var tag string
-		err = rows.Scan(&tag)
+		var tag = metadata.TagInfo{}
+		err = rows.Scan(&tag.Id, &tag.Text)
 		if err != nil {
 			return nil, err
 		}
@@ -51,68 +51,127 @@ func GetAllTags(db *sql.DB) ([]string, error) {
 	return results, nil
 }
 
-//Returns true if tag exists
-func FindTag(db *sql.DB, tag string) (bool, error) {
-	query := "select txt from tag where tag.txt = ?"
+// Adds a tag to the database and updates the co-occurrence table.
+// If the tag already exists, only the co-occurrence table will be updated.
+// Returns id of tag
+func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.TagInfo, error) {
+	existingTag, err := FindTag(db, newTag)
+	if err != nil {
+		return metadata.UnknownTag, err
+	}
+	tx, err := db.Begin()
+
+	if err != nil {
+		tx.Rollback()
+		return metadata.UnknownTag, nil
+
+	}
+	if existingTag.Id < 0 {
+		//tag does not exist, need to insert
+		res, err := db.Exec("INSERT INTO tag (txt) VALUES(?)", newTag)
+		if err != nil {
+			tx.Rollback()
+			return metadata.UnknownTag, err
+		}
+		newId, err := res.LastInsertId()
+		if err != nil {
+			tx.Rollback()
+			return metadata.UnknownTag, err
+		}
+		existingTag = metadata.TagInfo{Id: newId, Text: newTag}
+	}
+	//now update co-incidence table
+	//we enforce that t1 < t2 and ignore conflicts so we don't have to do checking on rows
+	if tagContext != nil {
+		for _, tag := range tagContext {
+			_, err = db.Exec("INSERT OR IGNORE INTO tag_assoc values (?,?)",
+				min(tag.Id, existingTag.Id), max(tag.Id, existingTag.Id))
+			if err != nil {
+				tx.Rollback()
+				return existingTag, err
+			}
+		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return existingTag, err
+	}
+	return existingTag, nil
+}
+
+//Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag
+func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
+	query := "select id, txt from tag where tag.txt = ?"
 	stmt, err := db.Prepare(query)
 	if err != nil {
-		return false, err
+		return metadata.UnknownTag, err
 	}
 	defer stmt.Close()
 	rows, err := stmt.Query(tag)
 	if err != nil {
-		return false, err
+		return metadata.UnknownTag, err
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return true, nil
+		info := metadata.TagInfo{}
+		err := rows.Scan(&info.Id, &info.Text)
+		if err != nil {
+			return metadata.UnknownTag, err
+		} else {
+			return info, nil
+		}
 	} else {
-		return false, nil
+		return metadata.UnknownTag, nil
 	}
 }
 
-//Returns true if the two tags passed in co-occur on some file.
-func IsTagCoincident(db *sql.DB, tagOne string, tagTwo string) (bool, error) {
-	query := "select txt from tag where tag.txt = ? and tag.id in " +
+//Returns tag record for tagOne if it is co-incident with tagTwo.
+func GetCoincidentTag(db *sql.DB, tagOne string, tagTwo string) (metadata.TagInfo, error) {
+	query := "select id, txt from tag where tag.txt = ? and tag.id in " +
 		" (select ta.t1 from tag_assoc ta, tag tt where tt.txt = ? and tt.id = ta.t2 " +
 		" UNION select ta.t2 from tag_assoc ta, tag tt where tt.txt = ? and tt.id = ta.t1 )"
 	stmt, err := db.Prepare(query)
 	if err != nil {
-		return false, err
+		return metadata.UnknownTag, err
 	}
 	defer stmt.Close()
 	rows, err := stmt.Query(tagOne, tagTwo, tagTwo)
 	if err != nil {
-		return false, err
+		return metadata.UnknownTag, err
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return true, nil
+		var tagInfo = metadata.TagInfo{}
+		err = rows.Scan(&tagInfo.Id, &tagInfo.Text)
+		if err != nil {
+			return metadata.UnknownTag, err
+		}
+		return tagInfo, nil
 	} else {
-		return false, nil
+		return metadata.UnknownTag, nil
 	}
 }
 
 //Lists all the tags that co-occur with ALL the tags passed in.
-func GetCoincidentTags(db *sql.DB, tags []string) ([]string, error) {
+func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo, error) {
 	if tags == nil || len(tags) == 0 {
 		return GetAllTags(db)
 	}
 	//need this because of the way go handles variadic parameters with the empty interface
 	var params []interface{} = make([]interface{}, len(tags)*2)
 	j := 0
-	query := "SELECT DISTINCT ot.txt FROM tag ot WHERE ot.id in ("
+	query := "SELECT DISTINCT ot.Id, ot.txt FROM tag ot WHERE ot.id in ("
 	for i := 0; i < len(tags); i++ {
 		if i > 0 {
 			query += " INTERSECT "
 		}
 		query += " select * from ( select ta.t1 from tag_assoc ta, tag t where t.id = ta.t2 and t.txt = ? UNION select ta.t2 from tag_assoc ta, tag t where t.id = ta.t1 and t.txt = ? )"
-		params[j] = tags[i]
+		params[j] = tags[i].Text
 		j += 1
-		params[j] = tags[i]
+		params[j] = tags[i].Text
 		j += 1
 	}
-	query += ") ORDER BY ot.txt DESC"
+	query += ") ORDER BY ot.txt ASC"
 
 	stmt, err := db.Prepare(query)
 	if err != nil {
@@ -124,21 +183,21 @@ func GetCoincidentTags(db *sql.DB, tags []string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var results []string
+	var results []metadata.TagInfo
 	for rows.Next() {
-		var tag string
-		err = rows.Scan(&tag)
+		var info = metadata.TagInfo{}
+		err = rows.Scan(&info.Id, &info.Text)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, tag)
+		results = append(results, info)
 	}
 	return results, nil
 }
 
 //Lists the files that have ALL the tags passed in, optionally filtered by name (if name has a length of > 0)
 //Name can also contain 0 or more wildcards characters (*).
-func GetFilesWithTags(db *sql.DB, tags []string, name string) ([]metadata.FileInfo, error) {
+func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metadata.FileInfo, error) {
 	//need this because of the way go handles variadic parameters with the empty interface
 	paramLength := len(tags)
 	if len(name) > 0 {
@@ -151,7 +210,7 @@ func GetFilesWithTags(db *sql.DB, tags []string, name string) ([]metadata.FileIn
 			query += " AND EXISTS "
 		}
 		query += "(SELECT 1 FROM file_tags ft, tag t WHERE ft.tid = t.id and fid = f.id AND t.txt = ?)"
-		params[i] = tags[i]
+		params[i] = tags[i].Text
 	}
 	if len(name) > 0 {
 		operator := " = "
@@ -182,4 +241,20 @@ func GetFilesWithTags(db *sql.DB, tags []string, name string) ([]metadata.FileIn
 		results = append(results, info)
 	}
 	return results, nil
+}
+
+func min(a int64, b int64) int64 {
+	if a <= b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func max(a int64, b int64) int64 {
+	if a >= b {
+		return a
+	} else {
+		return b
+	}
 }

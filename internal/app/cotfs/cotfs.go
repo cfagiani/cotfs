@@ -11,7 +11,7 @@ import (
 	"os"
 )
 
-//Mounts the filesystem at the path specified and opens a connection to the metadata database
+// Mounts the filesystem at the path specified and opens a connection to the metadata database
 func Mount(path, mountpoint string) error {
 	database, err := db.Open(path)
 	if err != nil {
@@ -56,11 +56,8 @@ func (f *FS) Root() (fs.Node, error) {
 
 type Dir struct {
 	database *sql.DB
-	// nil for the root directory, which has no entry in the zip
-	path []string
-}
-
-type MkDir struct {
+	// nil for the root directory
+	path []metadata.TagInfo
 }
 
 var _ fs.Node = (*Dir)(nil)
@@ -80,34 +77,43 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	return nil
 }
 
+var _ = fs.NodeMkdirer(&Dir{})
+
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
-	//TODO
-	return nil, nil
+	tag, err := db.AddTag(d.database, req.Name, d.path)
+	if err != nil {
+		return nil, err
+	}
+	return &Dir{
+		database: d.database,
+		path:     appendIfNotFound(d.path, tag),
+	}, nil
 }
 
 var _ = fs.NodeRequestLookuper(&Dir{})
 
 func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.LookupResponse) (fs.Node, error) {
-	var isDir = false
+
+	var err error
+	var foundTag metadata.TagInfo
 	if d.path == nil || len(d.path) == 0 {
-		found, error := db.FindTag(d.database, req.Name)
-		if error != nil {
-			return nil, error
+		foundTag, err = db.FindTag(d.database, req.Name)
+		if err != nil {
+			return nil, err
 		}
-		isDir = found
 	} else {
-		var err error
 		//now we need to see if the name corresponds to a directory. We have to hit the db for that
-		isDir, err = db.IsTagCoincident(d.database, d.path[0], req.Name)
+		//doesn't matter which tag we use to check for co-incidence so just pick the first
+		foundTag, err = db.GetCoincidentTag(d.database, req.Name, d.path[0].Text)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if isDir {
+	if foundTag.Id != metadata.UnknownTag.Id {
 		//since we don't allow file listing in the root, we know this must be a directory
 		return &Dir{
 			database: d.database,
-			path:     append(d.path, req.Name),
+			path:     appendIfNotFound(d.path, foundTag),
 		}, nil
 	}
 	info, _ := db.GetFilesWithTags(d.database, d.path, req.Name)
@@ -131,11 +137,11 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		return nil, err
 	}
 	for _, tag := range tags {
-		res = append(res, fuse.Dirent{Type: fuse.DT_Dir, Name: tag})
+		res = append(res, fuse.Dirent{Type: fuse.DT_Dir, Name: tag.Text})
 	}
 
-	//TODO: batch files in pseudo-directory if too many to list
-	//for now, only list files if not in the root
+	// TODO: batch files in pseudo-directory if too many to list
+	// for now, only list files if not in the root
 	if d.path != nil && len(d.path) > 0 {
 		files, fileError := db.GetFilesWithTags(d.database, d.path, "")
 		if fileError != nil {
@@ -201,4 +207,19 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 	}
 	resp.Data = buf[:n]
 	return err
+}
+
+func appendIfNotFound(tags []metadata.TagInfo, newTag metadata.TagInfo) []metadata.TagInfo {
+	for _, tag := range tags {
+		if tag.Text == newTag.Text {
+			return tags
+		}
+	}
+
+	//when we need to append, we want to ensure we have a new slice, so copy
+	c := make([]metadata.TagInfo, len(tags)+1)
+	copy(c, tags)
+	//add the new entry
+	c[len(c)-1] = newTag
+	return c
 }
