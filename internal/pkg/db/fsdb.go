@@ -99,7 +99,14 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 	return existingTag, nil
 }
 
-//Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag
+// Removes a tag from a file identified by file id
+func UntagFile(db *sql.DB, fileId int64, tagId int64) error {
+	_, err := db.Exec("DELETE FROM file_tags WHERE fid = ? AND tid = ?", fileId, tagId)
+	// TODO: should we remove the File record if it has no more tags?
+	return err
+}
+
+// Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag
 func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	query := "select id, txt from tag where tag.txt = ?"
 	stmt, err := db.Prepare(query)
@@ -125,7 +132,7 @@ func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	}
 }
 
-//Returns tag record for tagOne if it is co-incident with tagTwo.
+// Returns tag record for tagOne if it is co-incident with tagTwo.
 func GetCoincidentTag(db *sql.DB, tagOne string, tagTwo string) (metadata.TagInfo, error) {
 	query := "select id, txt from tag where tag.txt = ? and tag.id in " +
 		" (select ta.t1 from tag_assoc ta, tag tt where tt.txt = ? and tt.id = ta.t2 " +
@@ -152,12 +159,12 @@ func GetCoincidentTag(db *sql.DB, tagOne string, tagTwo string) (metadata.TagInf
 	}
 }
 
-//Lists all the tags that co-occur with ALL the tags passed in.
+// Lists all the tags that co-occur with ALL the tags passed in.
 func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo, error) {
 	if tags == nil || len(tags) == 0 {
 		return GetAllTags(db)
 	}
-	//need this because of the way go handles variadic parameters with the empty interface
+	// need this because of the way go handles variadic parameters with the empty interface
 	var params []interface{} = make([]interface{}, len(tags)*2)
 	j := 0
 	query := "SELECT DISTINCT ot.Id, ot.txt FROM tag ot WHERE ot.id in ("
@@ -195,8 +202,8 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo,
 	return results, nil
 }
 
-//Lists the files that have ALL the tags passed in, optionally filtered by name (if name has a length of > 0)
-//Name can also contain 0 or more wildcards characters (*).
+// Lists the files that have ALL the tags passed in, optionally filtered by name (if name has a length of > 0)
+// Name can also contain 0 or more wildcards characters (*).
 func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metadata.FileInfo, error) {
 	//need this because of the way go handles variadic parameters with the empty interface
 	paramLength := len(tags)

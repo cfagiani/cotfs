@@ -9,6 +9,7 @@ import (
 	"github.com/cfagiani/cotfs/internal/pkg/metadata"
 	"io"
 	"os"
+	"syscall"
 )
 
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
@@ -88,6 +89,32 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 		database: d.database,
 		path:     appendIfNotFound(d.path, tag),
 	}, nil
+}
+
+func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	if req.Dir {
+		//if any files have ONLY this tag, refuse to remove because "not empty"
+		//otherwise: unlink tag from lowest level in path
+
+		//TODO: is this the wrong error code? ENOTEMPTY shows up as IOError in MacOS
+		return error(syscall.ENOTEMPTY)
+	} else {
+		//if it's a file, just unlink from this tag and update the co-occurrence table if needed
+		files, err := db.GetFilesWithTags(d.database, d.path, req.Name)
+		if err != nil {
+			return err
+		}
+		if files == nil || len(files) == 0 {
+			return fuse.ENOENT
+		}
+		for _, file := range files {
+			err := db.UntagFile(d.database, file.Id, d.path[len(d.path)-1].Id)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 var _ = fs.NodeRequestLookuper(&Dir{})
