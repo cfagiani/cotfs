@@ -24,6 +24,13 @@ could be accessed at any of the below paths:
 /photo
 /landscape
 
+Semantics
+
+* mkdir - create tag
+* rmdir - remove tag
+* rm - removes the current tag (current directory) from the file
+* cp - adds tags corresponding to destination path to file(s)
+* mv - replaces tags corresponding to source path with those corresponding to destination path
 
 
 

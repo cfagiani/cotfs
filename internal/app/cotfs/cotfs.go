@@ -5,11 +5,13 @@ import (
 	"bazil.org/fuse/fs"
 	"context"
 	"database/sql"
+	"fmt"
 	"github.com/cfagiani/cotfs/internal/pkg/db"
 	"github.com/cfagiani/cotfs/internal/pkg/metadata"
 	"io"
 	"os"
 	"syscall"
+	"time"
 )
 
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
@@ -65,7 +67,8 @@ var _ fs.Node = (*Dir)(nil)
 
 func tagAttr(a *fuse.Attr) {
 	a.Size = 0
-	a.Mode = os.ModeDir
+	a.Mode = os.ModeDir | 0755
+
 }
 
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
@@ -93,25 +96,73 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if req.Dir {
-		//if any files have ONLY this tag, refuse to remove because "not empty"
-		//otherwise: unlink tag from lowest level in path
-
-		//TODO: is this the wrong error code? ENOTEMPTY shows up as IOError in MacOS
-		return error(syscall.ENOTEMPTY)
+		return d.handleTagRm(req)
 	} else {
-		//if it's a file, just unlink from this tag and update the co-occurrence table if needed
-		files, err := db.GetFilesWithTags(d.database, d.path, req.Name)
+		return d.handleFileRm(req)
+	}
+	return nil
+}
+
+func (d *Dir) handleTagRm(req *fuse.RemoveRequest) error {
+	// first get metadata corresponding to file
+	var dirTag metadata.TagInfo
+	var err error
+	if d.path != nil {
+		dirTag, err = db.GetCoincidentTag(d.database, req.Name, d.path[0].Text)
+	} else {
+		dirTag, err = db.GetTag(d.database, req.Name)
+	}
+
+	if err != nil {
+		return err
+	}
+	if dirTag.Id == metadata.UnknownTag.Id {
+		return fuse.ENOENT
+	}
+	// if any files have ONLY this tag, refuse to remove because "not empty"
+	count, err := db.GetFileCountWithSingleTag(d.database, dirTag)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return error(syscall.ENOTEMPTY)
+	}
+
+	// remove tag from files with this particular set of tags (essentially pushing them "up" a directory)
+	err = db.UntagFiles(d.database, appendIfNotFound(d.path, dirTag))
+	if err != nil {
+		return err
+	}
+	// remove tag_assoc record for parent if there is one
+	if d.path != nil && len(d.path) > 0 {
+		db.UnassociateTag(d.database, d.path[len(d.path)-1], dirTag)
+	}
+	// if no more files with tag present, remove tag
+	count, err = db.CountFilesWithTag(d.database, dirTag)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return db.DeleteTag(d.database, dirTag)
+	}
+
+	//TODO: is this the wrong error code? ENOTEMPTY shows up as IOError in MacOS
+	return error(syscall.ENOTEMPTY)
+}
+
+func (d *Dir) handleFileRm(req *fuse.RemoveRequest) error {
+	//if it's a file, just unlink from this tag
+	files, err := db.GetFilesWithTags(d.database, d.path, req.Name)
+	if err != nil {
+		return err
+	}
+	if files == nil || len(files) == 0 {
+		return fuse.ENOENT
+	}
+	for _, file := range files {
+		err := db.UntagFile(d.database, file.Id, d.path[len(d.path)-1].Id)
 		if err != nil {
 			return err
-		}
-		if files == nil || len(files) == 0 {
-			return fuse.ENOENT
-		}
-		for _, file := range files {
-			err := db.UntagFile(d.database, file.Id, d.path[len(d.path)-1].Id)
-			if err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -159,7 +210,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	var res []fuse.Dirent
 
-	tags, err := db.GetCoincidentTags(d.database, d.path)
+	tags, err := db.GetCoincidentTags(d.database, d.path, "")
 	if err != nil {
 		return nil, err
 	}
@@ -188,24 +239,34 @@ type File struct {
 var _ fs.Node = (*File)(nil)
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
-	//zipAttr(f.file, a)
+
+	stat, err := os.Stat(fmt.Sprintf("%s%c%s", f.fileInfo.Path, os.PathSeparator, f.fileInfo.Name))
+	if err != nil {
+		return err
+	}
+	sysStat := stat.Sys().(*syscall.Stat_t)
+
+	a.Size = uint64(stat.Size())
+	a.Mode = stat.Mode()
+	a.Mtime = stat.ModTime()
+	a.Ctime = time.Unix(int64(sysStat.Ctimespec.Sec), int64(sysStat.Ctimespec.Nsec))
+	a.Crtime = time.Unix(int64(sysStat.Ctimespec.Sec), int64(sysStat.Ctimespec.Nsec))
+
 	return nil
 }
 
 var _ = fs.NodeOpener(&File{})
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	r, err := os.Open(f.fileInfo.Path + "/" + f.fileInfo.Name)
+	r, err := os.Open(fmt.Sprintf("%s%c%s", f.fileInfo.Path, os.PathSeparator, f.fileInfo.Name))
 	if err != nil {
 		return nil, err
 	}
-	// individual entries inside a zip file are not seekable
-	resp.Flags |= fuse.OpenNonSeekable
 	return &FileHandle{r: r}, nil
 }
 
 type FileHandle struct {
-	r io.ReadCloser
+	r *os.File
 }
 
 var _ fs.Handle = (*FileHandle)(nil)

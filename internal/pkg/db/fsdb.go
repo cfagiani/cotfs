@@ -51,6 +51,27 @@ func GetAllTags(db *sql.DB) ([]metadata.TagInfo, error) {
 	return results, nil
 }
 
+// Removes the assoc record between the two tags
+func UnassociateTag(db *sql.DB, tagOne metadata.TagInfo, tagTwo metadata.TagInfo) error {
+	_, err := db.Exec("DELETE FROM tag_assoc where t1 = ? and t2 = ?", min(tagOne.Id, tagTwo.Id), max(tagOne.Id, tagTwo.Id))
+	return err
+}
+
+// Deletes a tag from the tag and tag_assoc table
+func DeleteTag(db *sql.DB, tag metadata.TagInfo) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("DELETE FROM TAG_ASSOC WHERE t1 = ? or t2 = ?", tag.Id, tag.Id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = db.Exec("DELETE FROM TAG WHERE id = ?", tag.Id)
+	return tx.Commit()
+}
+
 // Adds a tag to the database and updates the co-occurrence table.
 // If the tag already exists, only the co-occurrence table will be updated.
 // Returns id of tag
@@ -63,7 +84,7 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 
 	if err != nil {
 		tx.Rollback()
-		return metadata.UnknownTag, nil
+		return metadata.UnknownTag, err
 
 	}
 	if existingTag.Id < 0 {
@@ -106,6 +127,31 @@ func UntagFile(db *sql.DB, fileId int64, tagId int64) error {
 	return err
 }
 
+// Removes the tag corresponding to the last entry in the path passed in from all files in that path.
+func UntagFiles(db *sql.DB, path []metadata.TagInfo) error {
+	files, err := GetFilesWithTags(db, path, "")
+	if err != nil {
+		return err
+	}
+	if files != nil && len(files) > 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			tx.Rollback()
+			return err
+
+		}
+		for _, file := range files {
+			_, err := db.Exec("DELETE FROM FILE_TAGS WHERE FID = ? AND TID = ?", file.Id, path[len(path)-1].Id)
+			if err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	return nil
+}
+
 // Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag
 func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	query := "select id, txt from tag where tag.txt = ?"
@@ -130,6 +176,25 @@ func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	} else {
 		return metadata.UnknownTag, nil
 	}
+}
+
+func GetFileCountWithSingleTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
+	stmt, err := db.Prepare("select count(*) from file_tags where fid in (select fid from file_tags where tid = ?) group by fid having count(*)  = 1")
+	if err != nil {
+		return -1, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(tag.Id)
+	if err != nil {
+		return -1, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var cnt int
+		err = rows.Scan(&cnt)
+		return cnt, nil
+	}
+	return 0, nil
 }
 
 // Returns tag record for tagOne if it is co-incident with tagTwo.
@@ -159,13 +224,40 @@ func GetCoincidentTag(db *sql.DB, tagOne string, tagTwo string) (metadata.TagInf
 	}
 }
 
-// Lists all the tags that co-occur with ALL the tags passed in.
-func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo, error) {
+func GetTag(db *sql.DB, name string) (metadata.TagInfo, error) {
+	stmt, err := db.Prepare("select id, txt from tag where txt = ?")
+	if err != nil {
+		return metadata.UnknownTag, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(name)
+	if err != nil {
+		return metadata.UnknownTag, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var tag = metadata.TagInfo{}
+		err = rows.Scan(&tag.Id, &tag.Text)
+		if err != nil {
+			return metadata.UnknownTag, err
+		}
+		return tag, nil
+	}
+	return metadata.UnknownTag, nil
+
+}
+
+// Lists all the tags that co-occur with ALL the tags passed in, optionally filtered by name
+func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metadata.TagInfo, error) {
 	if tags == nil || len(tags) == 0 {
 		return GetAllTags(db)
 	}
 	// need this because of the way go handles variadic parameters with the empty interface
-	var params []interface{} = make([]interface{}, len(tags)*2)
+	paramSize := len(tags) * 2
+	if len(name) > 0 {
+		paramSize++
+	}
+	var params []interface{} = make([]interface{}, paramSize)
 	j := 0
 	query := "SELECT DISTINCT ot.Id, ot.txt FROM tag ot WHERE ot.id in ("
 	for i := 0; i < len(tags); i++ {
@@ -178,7 +270,16 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo,
 		params[j] = tags[i].Text
 		j += 1
 	}
-	query += ") ORDER BY ot.txt ASC"
+	query += ") "
+	if len(name) > 0 {
+		operator := " = "
+		if strings.Index(name, "*") >= 0 {
+			operator = " LIKE "
+		}
+		params[paramSize-1] = strings.Replace(name, "*", "%", -1)
+		query += fmt.Sprintf(" WHERE ot.txt %s ?", operator)
+	}
+	query += " ORDER BY ot.txt ASC"
 
 	stmt, err := db.Prepare(query)
 	if err != nil {
@@ -202,6 +303,29 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo) ([]metadata.TagInfo,
 	return results, nil
 }
 
+func CountFilesWithTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
+	stmt, err := db.Prepare("SELECT count(*) FROM file_tags WHERE tid = ?")
+	if err != nil {
+		return -1, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(tag.Id)
+	if err != nil {
+		return -1, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var count int
+		err = rows.Scan(&count)
+		if err != nil {
+			return -1, err
+		}
+		return count, nil
+	} else {
+		return 0, nil
+	}
+}
+
 // Lists the files that have ALL the tags passed in, optionally filtered by name (if name has a length of > 0)
 // Name can also contain 0 or more wildcards characters (*).
 func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metadata.FileInfo, error) {
@@ -222,7 +346,7 @@ func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metad
 	if len(name) > 0 {
 		operator := " = "
 		if strings.Index(name, "*") >= 0 {
-			operator = " like "
+			operator = " LIKE "
 		}
 		params[len(tags)] = strings.Replace(name, "*", "%", -1)
 		query += fmt.Sprintf(" AND f.name %s ?", operator)
