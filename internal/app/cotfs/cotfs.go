@@ -22,7 +22,12 @@ func Mount(path, mountpoint string) error {
 	}
 	defer database.Close()
 
-	c, err := fuse.Mount(mountpoint)
+	c, err := fuse.Mount(mountpoint,
+		fuse.FSName("cotfs"),
+		fuse.Subtype("cotfs"),
+		fuse.LocalVolume(), //this only impacts Finder on MacOS
+		fuse.VolumeName("Media Filesystem"),
+	)
 	if err != nil {
 		return err
 	}
@@ -79,6 +84,36 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	}
 	tagAttr(a)
 	return nil
+}
+
+var _ = fs.NodeSymlinker(&Dir{})
+
+func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
+	fmt.Printf("%s->%s\n", req.NewName, req.Target)
+
+	//TODO: implement link; can be cross-device (i.e. we need to create a new File db entry);
+	// when resolving relative paths, may need to take into account the mountpoint to convert to absolute path
+	return nil, nil
+}
+
+var _ = fs.NodeLinker(&Dir{})
+
+func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
+	//no links in the root
+	if d.path == nil {
+		return nil, fuse.EPERM
+	}
+	//ignore name, always use same name from existing file, just create a link by tagging
+	switch node := old.(type) {
+	case *Dir:
+		return nil, fuse.EPERM
+	case *File:
+		err := db.TagFile(d.database, node.fileInfo.Id, d.path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return old, nil
 }
 
 var _ = fs.NodeMkdirer(&Dir{})
@@ -258,6 +293,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 var _ = fs.NodeOpener(&File{})
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+
 	r, err := os.Open(fmt.Sprintf("%s%c%s", f.fileInfo.Path, os.PathSeparator, f.fileInfo.Name))
 	if err != nil {
 		return nil, err

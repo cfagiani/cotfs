@@ -105,7 +105,7 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 	//we enforce that t1 < t2 and ignore conflicts so we don't have to do checking on rows
 	if tagContext != nil {
 		for _, tag := range tagContext {
-			_, err = db.Exec("INSERT OR IGNORE INTO tag_assoc values (?,?)",
+			_, err = db.Exec("INSERT OR IGNORE INTO tag_assoc VALUES (?,?)",
 				min(tag.Id, existingTag.Id), max(tag.Id, existingTag.Id))
 			if err != nil {
 				tx.Rollback()
@@ -118,6 +118,25 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 		return existingTag, err
 	}
 	return existingTag, nil
+}
+
+// Applies all the tags passed in to a file, if they don't already exist
+func TagFile(db *sql.DB, fileId int64, tags []metadata.TagInfo) error {
+	if tags == nil || len(tags) == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		_, err = db.Exec("INSERT OR IGN	ORE INTO file_tags VALUES(?,?)", fileId, tag.Id)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Removes a tag from a file identified by file id
@@ -150,6 +169,33 @@ func UntagFiles(db *sql.DB, path []metadata.TagInfo) error {
 		return tx.Commit()
 	}
 	return nil
+}
+
+func CreateFileInPath(db *sql.DB, name string, path []metadata.TagInfo) (metadata.FileInfo, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	res, err := db.Exec("INSERT INTO FILE (NAME, PATH) VALUES (?, '/tmp/test')", name)
+	if err != nil {
+		tx.Rollback()
+		return metadata.UnknownFile, err
+	}
+	newId, err := res.LastInsertId()
+	if err != nil {
+		tx.Rollback()
+		return metadata.UnknownFile, err
+	}
+	fileInfo := metadata.FileInfo{Id: newId, Path: "/tmp/test", Name: name}
+	// now tag it
+	for _, tag := range path {
+		_, err := db.Exec("INSERT INTO FILE_TAGS (fid, tid) VALUES (?,?)", newId, tag.Id)
+		if err != nil {
+			tx.Rollback()
+			return metadata.UnknownFile, err
+		}
+	}
+	return fileInfo, tx.Commit()
 }
 
 // Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag

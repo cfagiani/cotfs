@@ -15,3 +15,5 @@ type TagInfo struct {
 }
 
 var UnknownTag = TagInfo{Id: -1, Text: ""}
+
+var UnknownFile = FileInfo{Id: -1}
