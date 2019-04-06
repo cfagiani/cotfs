@@ -10,13 +10,17 @@ import (
 	"github.com/cfagiani/cotfs/internal/pkg/metadata"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
 
+var mountPoint string
+
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
 func Mount(path, mountpoint string) error {
 	database, err := db.Open(path)
+	mountPoint = mountpoint
 	if err != nil {
 		return err
 	}
@@ -88,16 +92,70 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 
 var _ = fs.NodeSymlinker(&Dir{})
 
+// Responds to symlink calls by adding the tags corresponding to the destination to the file specified by the target
+// If the target of the link resides outside the cotfs file system, a new File database entry will be created pointing
+// to the underlying file.
 func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
-	fmt.Printf("%s->%s\n", req.NewName, req.Target)
-
+	//no links in the root
+	if d.path == nil {
+		return nil, fuse.EPERM
+	}
 	//TODO: implement link; can be cross-device (i.e. we need to create a new File db entry);
-	// when resolving relative paths, may need to take into account the mountpoint to convert to absolute path
+	// when resolving relative paths, may need to take into account the mount point to convert to absolute path
+	absPath := convertToAbsolutePath(d.path, req.Target)
+	if strings.Index(absPath, mountPoint) == 0 {
+		// if we're within our mount point, then strip it off and convert to a set of TagInfos
+	} else {
+		// target is a real file outside our filesystem.
+		// first make sure it is a file
+		fi, err := os.Stat(absPath)
+		if err != nil {
+			return nil, err
+		}
+		if fi.Mode().IsDir() {
+			// TODO: if target is a directory, recursively traverse it and add all the files,
+			//  treating Intermediate subdirs as tags; for now, just return error
+			return nil, fuse.EPERM
+		}
+	}
 	return nil, nil
+}
+
+// Converts a path string to an absolute path, treating the path parameter as the current working directory (used when
+// resolving relative paths).
+func convertToAbsolutePath(path []metadata.TagInfo, newPath string) string {
+
+	if strings.Index(newPath, string(os.PathSeparator)) == 0 {
+		// already an absolute path
+		return newPath
+	}
+	cwd := make([]string, len(path))
+	for i, t := range path {
+		cwd[i] = t.Text
+	}
+	// get the absolute path to the working directory by combining with the mount point
+	cwd = append(strings.Split(mountPoint, string(os.PathSeparator)), cwd...)
+
+	// apply the tokens in the new path to the current working directory to get the final path
+	tokens := strings.Split(newPath, string(os.PathSeparator))
+	for _, t := range tokens {
+		if t == "." {
+			continue
+		}
+		if t == ".." {
+			cwd = cwd[:len(cwd)-1]
+		} else {
+			cwd = append(cwd, t)
+		}
+	}
+	return fmt.Sprintf("%s%s", string(os.PathSeparator), strings.Join(cwd, string(os.PathSeparator)))
+
 }
 
 var _ = fs.NodeLinker(&Dir{})
 
+// Respond to hard link requests by applying the tags corresponding to the destination directory to the file.
+// We only support linking to files and do not allow links in the root (as that would be an untagged file).
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
 	//no links in the root
 	if d.path == nil {
@@ -118,6 +176,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 
 var _ = fs.NodeMkdirer(&Dir{})
 
+// Respond to mkdir calls by creating a tag and linking it to the tags in the current path.
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	tag, err := db.AddTag(d.database, req.Name, d.path)
 	if err != nil {
@@ -129,6 +188,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	}, nil
 }
 
+// Respond to rm by removing a tag (for removing directories) or un-tagging a file
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if req.Dir {
 		return d.handleTagRm(req)
@@ -138,8 +198,10 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	return nil
 }
 
+// Disassociates a tag with its parent tag or, if at the root, removes the tag entirely. Removals will be rejected
+// if the removal would leave any file un-tagged.
 func (d *Dir) handleTagRm(req *fuse.RemoveRequest) error {
-	// first get metadata corresponding to file
+	// first get metadata corresponding to tag
 	var dirTag metadata.TagInfo
 	var err error
 	if d.path != nil {
@@ -185,6 +247,7 @@ func (d *Dir) handleTagRm(req *fuse.RemoveRequest) error {
 	return error(syscall.ENOTEMPTY)
 }
 
+// Removes a tag from a file.
 func (d *Dir) handleFileRm(req *fuse.RemoveRequest) error {
 	//if it's a file, just unlink from this tag
 	files, err := db.GetFilesWithTags(d.database, d.path, req.Name)
@@ -205,6 +268,7 @@ func (d *Dir) handleFileRm(req *fuse.RemoveRequest) error {
 
 var _ = fs.NodeRequestLookuper(&Dir{})
 
+// Looks up a single name within a directory. Names can be either a co-incident tag or a file.
 func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.LookupResponse) (fs.Node, error) {
 
 	var err error
@@ -241,6 +305,7 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 
 var _ = fs.HandleReadDirAller(&Dir{})
 
+// Lists all contents of a directory
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	var res []fuse.Dirent
