@@ -100,55 +100,141 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	if d.path == nil {
 		return nil, fuse.EPERM
 	}
-	//TODO: implement link; can be cross-device (i.e. we need to create a new File db entry);
-	// when resolving relative paths, may need to take into account the mount point to convert to absolute path
-	absPath := convertToAbsolutePath(d.path, req.Target)
-	if strings.Index(absPath, mountPoint) == 0 {
-		// if we're within our mount point, then strip it off and convert to a set of TagInfos
+	absDirPath, fileName := convertToAbsolutePath(d.path, req.Target)
+	if strings.Index(absDirPath, mountPoint) == 0 {
+		return d.handleWithinFSLink(absDirPath, fileName)
 	} else {
 		// target is a real file outside our filesystem.
-		// first make sure it is a file
-		fi, err := os.Stat(absPath)
+		return d.handleCrossDeviceLink(absDirPath, fileName)
+	}
+}
+
+// Handles linking to a file that resides outside this cotfs file system. This function will find or create a new file
+// record (only 1 file record per absolute path is permitted) and apply the tags from the destination directory to the
+// file record.
+func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node, error) {
+	// first make sure it is a file
+	fi, err := os.Stat(fmt.Sprintf("%s%c%s", absDirPath, os.PathSeparator, fileName))
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode().IsDir() {
+		// TODO: if target is a directory, recursively traverse it and add all the files,
+		//  treating Intermediate subdirs as tags; for now, just return error
+		return nil, fuse.EPERM
+	}
+	// See if the file already exists
+	info, err := db.FindFileByAbsPath(d.database, fileName, absDirPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.Id == metadata.UnknownFile.Id {
+		// create the file record; we use the existing file name regardless of what the link specified
+		info, err = db.CreateFileInPath(d.database, fileName, absDirPath, d.path)
 		if err != nil {
 			return nil, err
 		}
-		if fi.Mode().IsDir() {
-			// TODO: if target is a directory, recursively traverse it and add all the files,
-			//  treating Intermediate subdirs as tags; for now, just return error
-			return nil, fuse.EPERM
-		}
+	} else {
+		// file already exists, just need to tag it
+		err = db.TagFile(d.database, info.Id, d.path)
 	}
-	return nil, nil
+	return &File{fileInfo: info}, err
+}
+
+// Handles creation of a link to a file that is already under management by cotfs by looking up the tags that correspond
+// to the absoluteDirPath and applying the tags from the destination directory to the file.
+// An error is returned if any of the tags in the path don't exist or the file doesn't exist.
+func (d *Dir) handleWithinFSLink(absDirPath string, fileName string) (fs.Node, error) {
+	// if we're within our mount point, then strip it off and convert to a set of TagInfos
+	noMountPath := strings.Replace(absDirPath, mountPoint, "", 1)
+	path, err := convertPathToTags(d.database, noMountPath)
+	if err != nil {
+		return nil, err
+	}
+	// now make sure the file exists
+	files, err := db.GetFilesWithTags(d.database, path, fileName)
+	if err != nil {
+		return nil, err
+	}
+	if files == nil || len(files) == 0 {
+		// file not found
+		return nil, fuse.ENOENT
+	} else if len(files) > 1 {
+		// more than 1 file matches
+		return nil, fuse.EPERM
+	}
+	// apply destination tags to the file
+	err = db.TagFile(d.database, files[0].Id, d.path)
+	if err != nil {
+		return nil, err
+	}
+	return &File{fileInfo: files[0]}, nil
+}
+
+// Converts an absolute directory path to an array of tag info objects
+func convertPathToTags(database *sql.DB, dirPath string) ([]metadata.TagInfo, error) {
+	tokens := strings.Split(dirPath, string(os.PathSeparator))
+	//build up a "path" array
+	tags := make([]metadata.TagInfo, len(tokens))
+	for i, tag := range tokens {
+		var tagInfo metadata.TagInfo
+		var err error
+		if i == 0 {
+			// if at the root, just lookup the tag
+			tagInfo, err = db.GetTag(database, tag)
+		} else {
+			// otherwise, look for co-incident tag
+			tagInfo, err = db.GetCoincidentTag(database, tag, tags[i-1].Text)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if tagInfo.Id == metadata.UnknownTag.Id {
+			// not found return error
+			return nil, fuse.ENOENT
+		}
+		tags[i] = tagInfo
+	}
+	return tags, nil
 }
 
 // Converts a path string to an absolute path, treating the path parameter as the current working directory (used when
 // resolving relative paths).
-func convertToAbsolutePath(path []metadata.TagInfo, newPath string) string {
+func convertToAbsolutePath(path []metadata.TagInfo, newPath string) (string, string) {
 
 	if strings.Index(newPath, string(os.PathSeparator)) == 0 {
 		// already an absolute path
-		return newPath
+		lastSep := strings.LastIndex(newPath, string(os.PathSeparator))
+		return newPath[0:lastSep], newPath[lastSep+1:]
 	}
 	cwd := make([]string, len(path))
 	for i, t := range path {
 		cwd[i] = t.Text
 	}
 	// get the absolute path to the working directory by combining with the mount point
-	cwd = append(strings.Split(mountPoint, string(os.PathSeparator)), cwd...)
+	mountSplit := strings.Split(mountPoint, string(os.PathSeparator))
+	if mountSplit[0] == "" {
+		cwd = append(mountSplit[1:], cwd...)
+	} else {
+		cwd = append(mountSplit, cwd...)
+	}
 
 	// apply the tokens in the new path to the current working directory to get the final path
 	tokens := strings.Split(newPath, string(os.PathSeparator))
-	for _, t := range tokens {
+	var fileName string
+	for i, t := range tokens {
 		if t == "." {
 			continue
 		}
-		if t == ".." {
+		if i == len(tokens)-1 {
+			fileName = t
+		} else if t == ".." {
 			cwd = cwd[:len(cwd)-1]
 		} else {
 			cwd = append(cwd, t)
 		}
 	}
-	return fmt.Sprintf("%s%s", string(os.PathSeparator), strings.Join(cwd, string(os.PathSeparator)))
+	return fmt.Sprintf("%s%s", string(os.PathSeparator), strings.Join(cwd, string(os.PathSeparator))), fileName
 
 }
 
@@ -195,7 +281,6 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	} else {
 		return d.handleFileRm(req)
 	}
-	return nil
 }
 
 // Disassociates a tag with its parent tag or, if at the root, removes the tag entirely. Removals will be rejected
@@ -404,11 +489,5 @@ func appendIfNotFound(tags []metadata.TagInfo, newTag metadata.TagInfo) []metada
 			return tags
 		}
 	}
-
-	//when we need to append, we want to ensure we have a new slice, so copy
-	c := make([]metadata.TagInfo, len(tags)+1)
-	copy(c, tags)
-	//add the new entry
-	c[len(c)-1] = newTag
-	return c
+	return append(tags, newTag)
 }

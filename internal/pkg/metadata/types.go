@@ -1,12 +1,9 @@
 package metadata
 
 type FileInfo struct {
-	Id       int64
-	Name     string
-	Path     string
-	Created  uint32
-	Modified uint32
-	BackedUp bool
+	Id   int64
+	Name string
+	Path string
 }
 
 type TagInfo struct {

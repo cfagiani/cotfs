@@ -130,7 +130,7 @@ func TagFile(db *sql.DB, fileId int64, tags []metadata.TagInfo) error {
 		return err
 	}
 	for _, tag := range tags {
-		_, err = db.Exec("INSERT OR IGN	ORE INTO file_tags VALUES(?,?)", fileId, tag.Id)
+		_, err = db.Exec("INSERT OR IGNORE INTO file_tags VALUES(?,?)", fileId, tag.Id)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -171,12 +171,37 @@ func UntagFiles(db *sql.DB, path []metadata.TagInfo) error {
 	return nil
 }
 
-func CreateFileInPath(db *sql.DB, name string, path []metadata.TagInfo) (metadata.FileInfo, error) {
+// Looks up a file using the name and absolute path in the underlying filesystem (not the tag path). Returns UnknownFile
+// if not found.
+func FindFileByAbsPath(db *sql.DB, name string, absPath string) (metadata.FileInfo, error) {
+	stmt, err := db.Prepare("SELECT id, name, path FROM file WHERE name = ? AND path = ?")
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(name, absPath)
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		info := metadata.FileInfo{}
+		err = rows.Scan(&info.Id, &info.Name, &info.Path)
+		if err != nil {
+			return metadata.UnknownFile, err
+		}
+		return info, nil
+	}
+	return metadata.UnknownFile, nil
+}
+
+// Creates a file record using the name and absolute path passed in and tags it with all the tags in the tagPath array.
+func CreateFileInPath(db *sql.DB, name string, absPath string, tagPath []metadata.TagInfo) (metadata.FileInfo, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return metadata.UnknownFile, err
 	}
-	res, err := db.Exec("INSERT INTO FILE (NAME, PATH) VALUES (?, '/tmp/test')", name)
+	res, err := db.Exec("INSERT INTO FILE (NAME, PATH) VALUES (?, ?)", name, absPath)
 	if err != nil {
 		tx.Rollback()
 		return metadata.UnknownFile, err
@@ -186,9 +211,9 @@ func CreateFileInPath(db *sql.DB, name string, path []metadata.TagInfo) (metadat
 		tx.Rollback()
 		return metadata.UnknownFile, err
 	}
-	fileInfo := metadata.FileInfo{Id: newId, Path: "/tmp/test", Name: name}
+	fileInfo := metadata.FileInfo{Id: newId, Path: absPath, Name: name}
 	// now tag it
-	for _, tag := range path {
+	for _, tag := range tagPath {
 		_, err := db.Exec("INSERT INTO FILE_TAGS (fid, tid) VALUES (?,?)", newId, tag.Id)
 		if err != nil {
 			tx.Rollback()
@@ -224,6 +249,7 @@ func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	}
 }
 
+// Gets files tagged with only the tag specified.
 func GetFileCountWithSingleTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
 	stmt, err := db.Prepare("select count(*) from file_tags where fid in (select fid from file_tags where tid = ?) group by fid having count(*)  = 1")
 	if err != nil {
@@ -270,6 +296,7 @@ func GetCoincidentTag(db *sql.DB, tagOne string, tagTwo string) (metadata.TagInf
 	}
 }
 
+// Looks up a single tag in the database by name (text)
 func GetTag(db *sql.DB, name string) (metadata.TagInfo, error) {
 	stmt, err := db.Prepare("select id, txt from tag where txt = ?")
 	if err != nil {
@@ -349,6 +376,7 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]meta
 	return results, nil
 }
 
+// Counts number of files tagged with the tag passed in.
 func CountFilesWithTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
 	stmt, err := db.Prepare("SELECT count(*) FROM file_tags WHERE tid = ?")
 	if err != nil {
@@ -380,8 +408,8 @@ func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metad
 	if len(name) > 0 {
 		paramLength += 1
 	}
-	var params []interface{} = make([]interface{}, paramLength)
-	query := "SELECT f.id, f.name, f.path, f.created, f.modified, f.backed_up from file f where EXISTS "
+	var params = make([]interface{}, paramLength)
+	query := "SELECT f.id, f.name, f.path from file f where EXISTS "
 	for i := 0; i < len(tags); i++ {
 		if i > 0 {
 			query += " AND EXISTS "
@@ -411,7 +439,7 @@ func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metad
 	var results []metadata.FileInfo
 	for rows.Next() {
 		info := metadata.FileInfo{}
-		err = rows.Scan(&info.Id, &info.Name, &info.Path, &info.Created, &info.Modified, &info.BackedUp)
+		err = rows.Scan(&info.Id, &info.Name, &info.Path)
 		if err != nil {
 			return nil, err
 		}

@@ -1,6 +1,7 @@
 Co-Occurring Tag File System (cotfs)
 -----------------------------------
 
+# Overview
 This is a simple FUSE file system that uses tags to organize files. When browsing the filesystem, tags are treated
 as directories. Within a directory, any tag that co-occurs with the tag represented by the current directory are listed
 as sub-directories. Files listed within a directory have ALL of the tags denoted by the path. The order of the tags 
@@ -24,22 +25,27 @@ could be accessed at any of the below paths:
 /photo
 /landscape
 
-Semantics
+### Semantics
+
+This filesystem is metadata-only. You cannot directly create a file in the filesystem. Instead, create your file(s) 
+elsewhere and create links in the desired tag-based directory structure.
 
 * mkdir - create tag
 * rmdir - remove tag
 * rm - removes the current tag (current directory) from the file
-* cp - adds tags corresponding to destination path to file(s)
-* mv - replaces tags corresponding to source path with those corresponding to destination path
+* ln - Applies all the tags corresponding to the destination directory to the file in the target. If the target lies 
+outside the cotfs filesystem, a new record will be created  
 
+NOTE: mv and cp are not supported.
 
-
-
-
-
-Dependencies
+## Dependencies
 
 * bazil.org/fuse
 * github.com/mattn/go-sqlite3
 
 NOTE: you need gcc installed when running "go install github.com/mattn/go-sqlite3"
+
+
+## Possible Enhancements
+* goroutine to scan directory for files and add them into an "untagged" bucket if they aren't already in the system
+* support for remote filesystems (google drive/photos, dropbox, s3)
