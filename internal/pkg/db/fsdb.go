@@ -11,7 +11,7 @@ import (
 
 var ddl = []string{
 	"CREATE TABLE IF NOT EXISTS tag(id INTEGER PRIMARY KEY, txt text);",
-	"CREATE TABLE IF NOT EXISTS file(id INTEGER PRIMARY KEY, name text, path text, created INTEGER, modified INTEGER, backed_up INTEGER);",
+	"CREATE TABLE IF NOT EXISTS file_md(id INTEGER PRIMARY KEY, name text, path text);",
 	"CREATE TABLE IF NOT EXISTS file_tags(fid INTEGER, tid INTEGER, PRIMARY KEY (fid,tid));",
 	"CREATE TABLE IF NOT EXISTS tag_assoc(t1 INTEGER, t2 INTEGER, PRIMARY KEY (t1,t2));",
 	"CREATE UNIQUE INDEX IF NOT EXISTS tag_idx ON tag(txt);"}
@@ -65,7 +65,7 @@ func DeleteTag(db *sql.DB, tag metadata.TagInfo) error {
 	}
 	_, err = db.Exec("DELETE FROM TAG_ASSOC WHERE t1 = ? or t2 = ?", tag.Id, tag.Id)
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return err
 	}
 	_, err = db.Exec("DELETE FROM TAG WHERE id = ?", tag.Id)
@@ -83,7 +83,7 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 	tx, err := db.Begin()
 
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return metadata.UnknownTag, err
 
 	}
@@ -91,12 +91,12 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 		//tag does not exist, need to insert
 		res, err := db.Exec("INSERT INTO tag (txt) VALUES(?)", newTag)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return metadata.UnknownTag, err
 		}
 		newId, err := res.LastInsertId()
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return metadata.UnknownTag, err
 		}
 		existingTag = metadata.TagInfo{Id: newId, Text: newTag}
@@ -108,7 +108,7 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 			_, err = db.Exec("INSERT OR IGNORE INTO tag_assoc VALUES (?,?)",
 				min(tag.Id, existingTag.Id), max(tag.Id, existingTag.Id))
 			if err != nil {
-				tx.Rollback()
+				_ = tx.Rollback()
 				return existingTag, err
 			}
 		}
@@ -118,109 +118,6 @@ func AddTag(db *sql.DB, newTag string, tagContext []metadata.TagInfo) (metadata.
 		return existingTag, err
 	}
 	return existingTag, nil
-}
-
-// Applies all the tags passed in to a file, if they don't already exist
-func TagFile(db *sql.DB, fileId int64, tags []metadata.TagInfo) error {
-	if tags == nil || len(tags) == 0 {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	for _, tag := range tags {
-		_, err = db.Exec("INSERT OR IGNORE INTO file_tags VALUES(?,?)", fileId, tag.Id)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// Removes a tag from a file identified by file id
-func UntagFile(db *sql.DB, fileId int64, tagId int64) error {
-	_, err := db.Exec("DELETE FROM file_tags WHERE fid = ? AND tid = ?", fileId, tagId)
-	// TODO: should we remove the File record if it has no more tags?
-	return err
-}
-
-// Removes the tag corresponding to the last entry in the path passed in from all files in that path.
-func UntagFiles(db *sql.DB, path []metadata.TagInfo) error {
-	files, err := GetFilesWithTags(db, path, "")
-	if err != nil {
-		return err
-	}
-	if files != nil && len(files) > 0 {
-		tx, err := db.Begin()
-		if err != nil {
-			tx.Rollback()
-			return err
-
-		}
-		for _, file := range files {
-			_, err := db.Exec("DELETE FROM FILE_TAGS WHERE FID = ? AND TID = ?", file.Id, path[len(path)-1].Id)
-			if err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-		return tx.Commit()
-	}
-	return nil
-}
-
-// Looks up a file using the name and absolute path in the underlying filesystem (not the tag path). Returns UnknownFile
-// if not found.
-func FindFileByAbsPath(db *sql.DB, name string, absPath string) (metadata.FileInfo, error) {
-	stmt, err := db.Prepare("SELECT id, name, path FROM file WHERE name = ? AND path = ?")
-	if err != nil {
-		return metadata.UnknownFile, err
-	}
-	defer stmt.Close()
-	rows, err := stmt.Query(name, absPath)
-	if err != nil {
-		return metadata.UnknownFile, err
-	}
-	defer rows.Close()
-	if rows.Next() {
-		info := metadata.FileInfo{}
-		err = rows.Scan(&info.Id, &info.Name, &info.Path)
-		if err != nil {
-			return metadata.UnknownFile, err
-		}
-		return info, nil
-	}
-	return metadata.UnknownFile, nil
-}
-
-// Creates a file record using the name and absolute path passed in and tags it with all the tags in the tagPath array.
-func CreateFileInPath(db *sql.DB, name string, absPath string, tagPath []metadata.TagInfo) (metadata.FileInfo, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return metadata.UnknownFile, err
-	}
-	res, err := db.Exec("INSERT INTO FILE (NAME, PATH) VALUES (?, ?)", name, absPath)
-	if err != nil {
-		tx.Rollback()
-		return metadata.UnknownFile, err
-	}
-	newId, err := res.LastInsertId()
-	if err != nil {
-		tx.Rollback()
-		return metadata.UnknownFile, err
-	}
-	fileInfo := metadata.FileInfo{Id: newId, Path: absPath, Name: name}
-	// now tag it
-	for _, tag := range tagPath {
-		_, err := db.Exec("INSERT INTO FILE_TAGS (fid, tid) VALUES (?,?)", newId, tag.Id)
-		if err != nil {
-			tx.Rollback()
-			return metadata.UnknownFile, err
-		}
-	}
-	return fileInfo, tx.Commit()
 }
 
 // Gets the id of a tag by name. If no tag exists, returns metadata.UnknownTag
@@ -247,26 +144,6 @@ func FindTag(db *sql.DB, tag string) (metadata.TagInfo, error) {
 	} else {
 		return metadata.UnknownTag, nil
 	}
-}
-
-// Gets files tagged with only the tag specified.
-func GetFileCountWithSingleTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
-	stmt, err := db.Prepare("select count(*) from file_tags where fid in (select fid from file_tags where tid = ?) group by fid having count(*)  = 1")
-	if err != nil {
-		return -1, err
-	}
-	defer stmt.Close()
-	rows, err := stmt.Query(tag.Id)
-	if err != nil {
-		return -1, err
-	}
-	defer rows.Close()
-	if rows.Next() {
-		var cnt int
-		err = rows.Scan(&cnt)
-		return cnt, nil
-	}
-	return 0, nil
 }
 
 // Returns tag record for tagOne if it is co-incident with tagTwo.
@@ -330,7 +207,7 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]meta
 	if len(name) > 0 {
 		paramSize++
 	}
-	var params []interface{} = make([]interface{}, paramSize)
+	var params = make([]interface{}, paramSize)
 	j := 0
 	query := "SELECT DISTINCT ot.Id, ot.txt FROM tag ot WHERE ot.id in ("
 	for i := 0; i < len(tags); i++ {
@@ -350,7 +227,7 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]meta
 			operator = " LIKE "
 		}
 		params[paramSize-1] = strings.Replace(name, "*", "%", -1)
-		query += fmt.Sprintf(" WHERE ot.txt %s ?", operator)
+		query += fmt.Sprintf(" AND ot.txt %s ?", operator)
 	}
 	query += " ORDER BY ot.txt ASC"
 
@@ -374,6 +251,129 @@ func GetCoincidentTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]meta
 		results = append(results, info)
 	}
 	return results, nil
+}
+
+// Applies all the tags passed in to a file, if they don't already exist
+func TagFile(db *sql.DB, fileId int64, tags []metadata.TagInfo) error {
+	if tags == nil || len(tags) == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		_, err = db.Exec("INSERT OR IGNORE INTO file_tags VALUES(?,?)", fileId, tag.Id)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Removes a tag from a file identified by file id
+func UntagFile(db *sql.DB, fileId int64, tagId int64) error {
+	_, err := db.Exec("DELETE FROM file_tags WHERE fid = ? AND tid = ?", fileId, tagId)
+	// TODO: should we remove the File record if it has no more tags?
+	return err
+}
+
+// Removes the tag corresponding to the last entry in the path passed in from all files in that path.
+func UntagFiles(db *sql.DB, path []metadata.TagInfo) error {
+	files, err := GetFilesWithTags(db, path, "")
+	if err != nil {
+		return err
+	}
+	if files != nil && len(files) > 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+
+		}
+		for _, file := range files {
+			_, err := db.Exec("DELETE FROM FILE_TAGS WHERE FID = ? AND TID = ?", file.Id, path[len(path)-1].Id)
+			if err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	return nil
+}
+
+// Looks up a file using the name and absolute path in the underlying filesystem (not the tag path). Returns UnknownFile
+// if not found.
+func FindFileByAbsPath(db *sql.DB, name string, absPath string) (metadata.FileInfo, error) {
+	stmt, err := db.Prepare("SELECT id, name, path FROM file_md WHERE name = ? AND path = ?")
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(name, absPath)
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		info := metadata.FileInfo{}
+		err = rows.Scan(&info.Id, &info.Name, &info.Path)
+		if err != nil {
+			return metadata.UnknownFile, err
+		}
+		return info, nil
+	}
+	return metadata.UnknownFile, nil
+}
+
+// Creates a file record using the name and absolute path passed in and tags it with all the tags in the tagPath array.
+func CreateFileInPath(db *sql.DB, name string, absPath string, tagPath []metadata.TagInfo) (metadata.FileInfo, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return metadata.UnknownFile, err
+	}
+	res, err := db.Exec("INSERT INTO file_md (NAME, PATH) VALUES (?, ?)", name, absPath)
+	if err != nil {
+		_ = tx.Rollback()
+		return metadata.UnknownFile, err
+	}
+	newId, err := res.LastInsertId()
+	if err != nil {
+		_ = tx.Rollback()
+		return metadata.UnknownFile, err
+	}
+	fileInfo := metadata.FileInfo{Id: newId, Path: absPath, Name: name}
+	// now tag it
+	for _, tag := range tagPath {
+		_, err := db.Exec("INSERT INTO FILE_TAGS (fid, tid) VALUES (?,?)", newId, tag.Id)
+		if err != nil {
+			_ = tx.Rollback()
+			return metadata.UnknownFile, err
+		}
+	}
+	return fileInfo, tx.Commit()
+}
+
+// Gets files tagged with only the tag specified.
+func GetFileCountWithSingleTag(db *sql.DB, tag metadata.TagInfo) (int, error) {
+	stmt, err := db.Prepare("select count(*) from (select 1 from file_tags where fid in (select fid from file_tags where tid = ?) group by fid having count(*)  = 1)")
+	if err != nil {
+		return -1, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(tag.Id)
+	if err != nil {
+		return -1, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var cnt int
+		err = rows.Scan(&cnt)
+		return cnt, nil
+	}
+	return 0, nil
 }
 
 // Counts number of files tagged with the tag passed in.
@@ -409,7 +409,7 @@ func GetFilesWithTags(db *sql.DB, tags []metadata.TagInfo, name string) ([]metad
 		paramLength += 1
 	}
 	var params = make([]interface{}, paramLength)
-	query := "SELECT f.id, f.name, f.path from file f where EXISTS "
+	query := "SELECT f.id, f.name, f.path from file_md f where EXISTS "
 	for i := 0; i < len(tags); i++ {
 		if i > 0 {
 			query += " AND EXISTS "

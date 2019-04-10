@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 )
 
-
 var progName = filepath.Base(os.Args[0])
 
 func main() {
@@ -29,7 +28,6 @@ func main() {
 		log.Fatal(err)
 	}
 }
-
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", progName)

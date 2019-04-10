@@ -16,6 +16,8 @@ var threeTag = []metadata.TagInfo{
 }
 var testMount = fmt.Sprintf("%cmymnt/tmp", os.PathSeparator)
 
+// Tests conversion of path strings that may or may be relative to absolute paths, including those that use relative
+// "parent dir" (..) to traverse outside of the mount point.
 func TestConvertToAbsolutePath(t *testing.T) {
 	conditions := []struct {
 		tags     []metadata.TagInfo
@@ -76,6 +78,7 @@ func TestConvertToAbsolutePath(t *testing.T) {
 	}
 }
 
+// Validates that the appendIfNotFound method does not create duplicates in the array.
 func TestAppendIfNotFound(t *testing.T) {
 	conditions := []struct {
 		tags   []metadata.TagInfo
@@ -103,5 +106,10 @@ func TestAppendIfNotFound(t *testing.T) {
 		if len(result) != condition.len {
 			t.Errorf("Expected to get %d elements but got %d", condition.len, len(result))
 		}
+		// if we did append, make sure last element is the one we appended
+		if len(result) > len(condition.tags) && result[len(result)-1].Text != condition.newTag.Text {
+			t.Errorf("Expected %s to be appended to end but it was not", condition.newTag.Text)
+		}
+
 	}
 }
