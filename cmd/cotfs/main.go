@@ -22,15 +22,15 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	path := flag.Arg(0)
+	metadataPath := flag.Arg(0)
 	mountpoint := flag.Arg(1)
-	if err := cotfs.Mount(path, mountpoint); err != nil {
+	if err := cotfs.Mount(metadataPath, mountpoint); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", progName)
-	fmt.Fprintf(os.Stderr, "  %s <metadataDir> <mountPoint>\n", progName)
+	fmt.Fprintf(os.Stderr, "  %s <metadataFile> <mountPoint>\n", progName)
 	flag.PrintDefaults()
 }

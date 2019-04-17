@@ -47,5 +47,5 @@ NOTE: you need gcc installed when running "go install github.com/mattn/go-sqlite
 
 
 ## Possible Enhancements
-* goroutine to scan directory for files and add them into an "untagged" bucket if they aren't already in the system
-* support for remote filesystems (google drive/photos, dropbox, s3)
+* support for indexing remote filesystems (google drive/photos, dropbox, s3)
+* pre-create "top-level" tags to keep directory listing resonable? Other alternative would be some sort of grouping psuedo-tag(s)

@@ -18,8 +18,8 @@ import (
 var mountPoint string
 
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
-func Mount(path, mountpoint string) error {
-	database, err := db.Open(path)
+func Mount(metadataPath string, mountpoint string) error {
+	database, err := db.Open(metadataPath)
 	mountPoint = mountpoint
 	if err != nil {
 		return err
