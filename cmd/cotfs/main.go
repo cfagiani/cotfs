@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cfagiani/cotfs/internal/app/cotfs"
+	"github.com/cfagiani/cotfs/internal/pkg/storage"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ func main() {
 	}
 	metadataPath := flag.Arg(0)
 	mountpoint := flag.Arg(1)
-	if err := cotfs.Mount(metadataPath, mountpoint); err != nil {
+	if err := cotfs.Mount(metadataPath, mountpoint, storage.LocalFileStorage{}); err != nil {
 		log.Fatal(err)
 	}
 }

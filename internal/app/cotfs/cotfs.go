@@ -8,25 +8,27 @@ import (
 	"fmt"
 	"github.com/cfagiani/cotfs/internal/pkg/db"
 	"github.com/cfagiani/cotfs/internal/pkg/metadata"
+	"github.com/cfagiani/cotfs/internal/pkg/storage"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var mountPoint string
-
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
-func Mount(metadataPath string, mountpoint string) error {
+func Mount(metadataPath string, mountPoint string, storage storage.FileStorage) error {
 	database, err := db.Open(metadataPath)
-	mountPoint = mountpoint
+
 	if err != nil {
 		return err
 	}
 	defer database.Close()
 
-	c, err := fuse.Mount(mountpoint,
+	// try un-mounting just in case we're already mounted
+	fuse.Unmount(mountPoint)
+	c, err := fuse.Mount(mountPoint,
 		fuse.FSName("cotfs"),
 		fuse.Subtype("cotfs"),
 		fuse.LocalVolume(), //this only impacts Finder on MacOS
@@ -38,7 +40,9 @@ func Mount(metadataPath string, mountpoint string) error {
 	defer c.Close()
 
 	filesys := &FS{
-		database: database,
+		database:      database,
+		mountPoint:    mountPoint,
+		storageSystem: storage,
 	}
 	if err := fs.Serve(c, filesys); err != nil {
 		return err
@@ -54,14 +58,18 @@ func Mount(metadataPath string, mountpoint string) error {
 }
 
 type FS struct {
-	database *sql.DB
+	database      *sql.DB
+	mountPoint    string
+	storageSystem storage.FileStorage
 }
 
 var _ fs.FS = (*FS)(nil)
 
 func (f *FS) Root() (fs.Node, error) {
 	n := &Dir{
-		database: f.database,
+		database:      f.database,
+		storageSystem: f.storageSystem,
+		mountPoint:    f.mountPoint,
 	}
 	return n, nil
 }
@@ -69,7 +77,9 @@ func (f *FS) Root() (fs.Node, error) {
 type Dir struct {
 	database *sql.DB
 	// nil for the root directory
-	path []metadata.TagInfo
+	path          []metadata.TagInfo
+	mountPoint    string
+	storageSystem storage.FileStorage
 }
 
 var _ fs.Node = (*Dir)(nil)
@@ -100,8 +110,8 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	if d.path == nil {
 		return nil, fuse.EPERM
 	}
-	absDirPath, fileName := convertToAbsolutePath(d.path, req.Target)
-	if strings.Index(absDirPath, mountPoint) == 0 {
+	absDirPath, fileName := convertToAbsolutePath(d.path, req.Target, d.mountPoint)
+	if strings.Index(absDirPath, d.mountPoint) == 0 {
 		return d.handleWithinFSLink(absDirPath, fileName)
 	} else {
 		// target is a real file outside our filesystem.
@@ -114,7 +124,7 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 // file record.
 func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node, error) {
 	// first make sure it is a file
-	fi, err := os.Stat(fmt.Sprintf("%s%c%s", absDirPath, os.PathSeparator, fileName))
+	fi, err := d.storageSystem.Stat(fmt.Sprintf("%s%c%s", absDirPath, os.PathSeparator, fileName))
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node
 		// file already exists, just need to tag it
 		err = db.TagFile(d.database, info.Id, d.path)
 	}
-	return &File{fileInfo: info}, err
+	return &File{fileInfo: info, storage: d.storageSystem}, err
 }
 
 // Handles creation of a link to a file that is already under management by cotfs by looking up the tags that correspond
@@ -146,7 +156,7 @@ func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node
 // An error is returned if any of the tags in the path don't exist or the file doesn't exist.
 func (d *Dir) handleWithinFSLink(absDirPath string, fileName string) (fs.Node, error) {
 	// if we're within our mount point, then strip it off and convert to a set of TagInfos
-	noMountPath := strings.Replace(absDirPath, mountPoint, "", 1)
+	noMountPath := strings.Replace(absDirPath, d.mountPoint, "", 1)
 	path, err := convertPathToTags(d.database, noMountPath)
 	if err != nil {
 		return nil, err
@@ -168,7 +178,7 @@ func (d *Dir) handleWithinFSLink(absDirPath string, fileName string) (fs.Node, e
 	if err != nil {
 		return nil, err
 	}
-	return &File{fileInfo: files[0]}, nil
+	return &File{fileInfo: files[0], storage: d.storageSystem}, nil
 }
 
 // Converts an absolute directory path to an array of tag info objects
@@ -200,12 +210,12 @@ func convertPathToTags(database *sql.DB, dirPath string) ([]metadata.TagInfo, er
 
 // Converts a path string to an absolute path, treating the path parameter as the current working directory (used when
 // resolving relative paths).
-func convertToAbsolutePath(path []metadata.TagInfo, newPath string) (string, string) {
+func convertToAbsolutePath(path []metadata.TagInfo, newPath string, mountPoint string) (string, string) {
 
 	if strings.Index(newPath, string(os.PathSeparator)) == 0 {
 		// already an absolute path
 		lastSep := strings.LastIndex(newPath, string(os.PathSeparator))
-		return newPath[0:lastSep], newPath[lastSep+1:]
+		return filepath.Clean(newPath[0:lastSep]), newPath[lastSep+1:]
 	}
 	cwd := make([]string, len(path))
 	for i, t := range path {
@@ -234,7 +244,8 @@ func convertToAbsolutePath(path []metadata.TagInfo, newPath string) (string, str
 			cwd = append(cwd, t)
 		}
 	}
-	return fmt.Sprintf("%s%s", string(os.PathSeparator), strings.Join(cwd, string(os.PathSeparator))), fileName
+	return filepath.Clean(fmt.Sprintf("%s%s",
+		string(os.PathSeparator), strings.Join(cwd, string(os.PathSeparator)))), fileName
 
 }
 
@@ -269,8 +280,10 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 		return nil, err
 	}
 	return &Dir{
-		database: d.database,
-		path:     appendIfNotFound(d.path, tag),
+		database:      d.database,
+		path:          appendIfNotFound(d.path, tag),
+		storageSystem: d.storageSystem,
+		mountPoint:    d.mountPoint,
 	}, nil
 }
 
@@ -307,7 +320,7 @@ func (d *Dir) handleTagRm(req *fuse.RemoveRequest) error {
 		return err
 	}
 	if count > 0 {
-		return error(syscall.ENOTEMPTY)
+		return fuse.Errno(syscall.ENOTEMPTY)
 	}
 
 	// remove tag from files with this particular set of tags (essentially pushing them "up" a directory)
@@ -328,12 +341,15 @@ func (d *Dir) handleTagRm(req *fuse.RemoveRequest) error {
 		return db.DeleteTag(d.database, dirTag)
 	}
 
-	//TODO: is this the wrong error code? ENOTEMPTY shows up as IOError in MacOS
-	return error(syscall.ENOTEMPTY)
+	return fuse.Errno(syscall.ENOTEMPTY)
 }
 
 // Removes a tag from a file.
 func (d *Dir) handleFileRm(req *fuse.RemoveRequest) error {
+	// if we're in the root, we can't have a file so return noent
+	if d.path == nil {
+		return fuse.ENOENT
+	}
 	//if it's a file, just unlink from this tag
 	files, err := db.GetFilesWithTags(d.database, d.path, req.Name)
 	if err != nil {
@@ -374,14 +390,17 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 	if foundTag.Id != metadata.UnknownTag.Id {
 		//since we don't allow file listing in the root, we know this must be a directory
 		return &Dir{
-			database: d.database,
-			path:     appendIfNotFound(d.path, foundTag),
+			database:      d.database,
+			path:          appendIfNotFound(d.path, foundTag),
+			storageSystem: d.storageSystem,
+			mountPoint:    d.mountPoint,
 		}, nil
 	}
 	info, _ := db.GetFilesWithTags(d.database, d.path, req.Name)
 	if info != nil && len(info) > 0 {
 		return &File{
 			fileInfo: info[0],
+			storage:  d.storageSystem,
 		}, nil
 	}
 	return nil, fuse.ENOENT
@@ -419,6 +438,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 type File struct {
 	fileInfo metadata.FileInfo
+	storage  storage.FileStorage
 }
 
 var _ fs.Node = (*File)(nil)
@@ -444,7 +464,7 @@ var _ = fs.NodeOpener(&File{})
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 
-	r, err := os.Open(fmt.Sprintf("%s%c%s", f.fileInfo.Path, os.PathSeparator, f.fileInfo.Name))
+	r, err := f.storage.Open(fmt.Sprintf("%s%c%s", f.fileInfo.Path, os.PathSeparator, f.fileInfo.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +472,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 }
 
 type FileHandle struct {
-	r *os.File
+	r storage.File
 }
 
 var _ fs.Handle = (*FileHandle)(nil)
