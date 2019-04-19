@@ -341,6 +341,84 @@ func TestDir_RemoveFile(t *testing.T) {
 	}
 }
 
+// Verifies we can symlink within the filesystem
+func TestDir_Symlink(t *testing.T) {
+	metaDb, storageSys := getMockFixtures(t)
+	defer metaDb.Close()
+	tags := createTags(metaDb, 3, 3)
+	file1, _ := db.CreateFileInPath(metaDb, "singleTagFile", fmt.Sprintf("%cblah", os.PathSeparator), []metadata.TagInfo{tags[0][0]})
+	db.CreateFileInPath(metaDb, "singleTagFile2", "path2", []metadata.TagInfo{tags[0][0]})
+	conditions := []struct {
+		path          []metadata.TagInfo
+		target        string
+		expectedName  string
+		expectedError error
+	}{
+		{nil, fmt.Sprintf("%s%c%s%c%s", testMount, os.PathSeparator, tags[0][0].Text, os.PathSeparator, file1.Name), "", fuse.EPERM},
+		{[]metadata.TagInfo{tags[0][1]}, fmt.Sprintf("%s%c%s%c%s*", testMount, os.PathSeparator, tags[0][0].Text, os.PathSeparator, file1.Name), "", fuse.EPERM},
+		{[]metadata.TagInfo{tags[0][1]}, fmt.Sprintf("%s%c%s%c%s", testMount, os.PathSeparator, tags[0][0].Text, os.PathSeparator, file1.Name), file1.Name, nil},
+		{[]metadata.TagInfo{tags[0][1]}, fmt.Sprintf("%s%c%s%cnotThere", testMount, os.PathSeparator, tags[0][0].Text, os.PathSeparator), "", fuse.ENOENT},
+		{[]metadata.TagInfo{tags[0][1]}, fmt.Sprintf("%croot%csomeDIR", os.PathSeparator, os.PathSeparator), "", fuse.EPERM},
+		{[]metadata.TagInfo{tags[0][2]}, fmt.Sprintf("%s%c%s", file1.Path, os.PathSeparator, file1.Name), file1.Name, nil},
+		{[]metadata.TagInfo{tags[0][2]}, fmt.Sprintf("%croot%cSomeFile", os.PathSeparator, os.PathSeparator), "SomeFile", nil},
+	}
+	for _, condition := range conditions {
+		dir := &Dir{
+			database:      metaDb,
+			mountPoint:    testMount,
+			path:          condition.path,
+			storageSystem: storageSys,
+		}
+
+		node, err := dir.Symlink(nil, &fuse.SymlinkRequest{Target: condition.target})
+		if condition.expectedError != nil && condition.expectedError != err {
+			t.Errorf("Unexpected error during link %v", err)
+		} else if condition.expectedError == nil {
+			fileNode, ok := node.(*File)
+			if !ok {
+				t.Error("Symlink should return a file")
+			}
+			if fileNode.fileInfo.Name != condition.expectedName {
+				t.Errorf("Expceted file to be named %s but found %s", condition.expectedName, fileNode.fileInfo.Name)
+			}
+		}
+	}
+}
+
+// Verifies hard-linking works within the filesystem
+func TestDir_Link(t *testing.T) {
+	metaDb, storageSys := getMockFixtures(t)
+	defer metaDb.Close()
+	tags := createTags(metaDb, 3, 3)
+	file1, _ := db.CreateFileInPath(metaDb, "singleTagFile", "path1", []metadata.TagInfo{tags[0][0]})
+	conditions := []struct {
+		path          []metadata.TagInfo
+		source        fs.Node
+		expectedError error
+	}{
+		{nil, &File{fileInfo: file1}, fuse.EPERM},
+		{nil, &Dir{path: tags[0]}, fuse.EPERM},
+		{[]metadata.TagInfo{tags[0][1]}, &Dir{path: tags[0]}, fuse.EPERM},
+		{[]metadata.TagInfo{tags[0][1]}, &File{fileInfo: file1}, nil},
+	}
+	for _, condition := range conditions {
+		dir := &Dir{
+			database:      metaDb,
+			mountPoint:    testMount,
+			path:          condition.path,
+			storageSystem: storageSys,
+		}
+		node, err := dir.Link(nil, &fuse.LinkRequest{}, condition.source)
+		if condition.expectedError != nil && condition.expectedError != err {
+			t.Errorf("Unexpected error during link %v", err)
+		} else if condition.expectedError == nil {
+			if condition.source != node {
+				t.Error("Expected link to return the same node as source on success")
+			}
+		}
+	}
+}
+
 // Tests conversion of path strings that may or may be relative to absolute paths, including those that use relative
 // "parent dir" (..) to traverse outside of the mount point.
 func TestConvertToAbsolutePath(t *testing.T) {
@@ -463,7 +541,7 @@ func containsFile(entry fuse.Dirent, files []metadata.FileInfo) bool {
 }
 
 // creates tags tags and their associations
-func createTags(database *sql.DB, levels int, tagsPerLevel int) ([][]metadata.TagInfo) {
+func createTags(database *sql.DB, levels int, tagsPerLevel int) [][]metadata.TagInfo {
 	tags := make([][]metadata.TagInfo, levels)
 	for i := 0; i < levels; i++ {
 		tags[i] = make([]metadata.TagInfo, tagsPerLevel)
@@ -511,9 +589,7 @@ func (MockFileStorage) Open(name string) (storage.File, error) {
 	if strings.Index(name, "ERROR") >= 0 {
 		return nil, errors.New("Generated error")
 	} else {
-		return MockFile{
-
-		}, nil
+		return MockFile{}, nil
 	}
 }
 

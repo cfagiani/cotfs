@@ -156,6 +156,9 @@ func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node
 func (d *Dir) handleWithinFSLink(absDirPath string, fileName string) (fs.Node, error) {
 	// if we're within our mount point, then strip it off and convert to a set of TagInfos
 	noMountPath := strings.Replace(absDirPath, d.mountPoint, "", 1)
+	if strings.IndexRune(noMountPath, os.PathSeparator) == 0 {
+		noMountPath = noMountPath[1:]
+	}
 	path, err := convertPathToTags(d.database, noMountPath)
 	if err != nil {
 		return nil, err
