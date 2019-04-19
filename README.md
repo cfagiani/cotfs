@@ -38,6 +38,9 @@ outside the cotfs filesystem, a new record will be created
 
 NOTE: mv and cp are not supported.
 
+## Prerequisites
+Go 1.9+
+
 ## Dependencies
 
 * bazil.org/fuse

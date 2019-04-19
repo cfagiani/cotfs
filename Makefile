@@ -3,7 +3,7 @@
 all: clean deps build install
 
 build:
-	go build
+	go build ./...
 
 install:
 	go install ./...

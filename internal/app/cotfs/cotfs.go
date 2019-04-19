@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // Mounts the filesystem at the path specified and opens a connection to the metadata database
@@ -449,13 +448,12 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	if err != nil {
 		return err
 	}
-	sysStat := stat.Sys().(*syscall.Stat_t)
 
 	a.Size = uint64(stat.Size())
 	a.Mode = stat.Mode()
 	a.Mtime = stat.ModTime()
-	a.Ctime = time.Unix(int64(sysStat.Ctimespec.Sec), int64(sysStat.Ctimespec.Nsec))
-	a.Crtime = time.Unix(int64(sysStat.Ctimespec.Sec), int64(sysStat.Ctimespec.Nsec))
+	a.Ctime = getCreateTime(stat)
+	a.Crtime = a.Ctime
 
 	return nil
 }
