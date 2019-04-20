@@ -14,16 +14,16 @@ var defaultTag = "uncategorized"
 
 //TODO: externalize into configuration file
 var extensionToTagMap = map[string][]string{
-	".jpg":     {"image"},
-	".jpeg":    {"image"},
-	".bmp":     {"image"},
-	".png":     {"image"},
-	".gif":     {"image"},
-	".tiff":    {"image"},
-	".tif":     {"image"},
-	".ico":     {"image"},
-	".svg":     {"image"},
-	".psd":     {"image"},
+	".jpg":     {"media", "image"},
+	".jpeg":    {"media", "image"},
+	".bmp":     {"media", "image"},
+	".png":     {"media", "image"},
+	".gif":     {"media", "image"},
+	".tiff":    {"media", "image"},
+	".tif":     {"media", "image"},
+	".ico":     {"media", "image"},
+	".svg":     {"media", "image"},
+	".psd":     {"media", "image"},
 	".odt":     {"document"},
 	".rtf":     {"document"},
 	".doc":     {"document"},
@@ -43,18 +43,18 @@ var extensionToTagMap = map[string][]string{
 	".ods":     {"document", "spreadsheet"},
 	".txt":     {"document"},
 	".pdf":     {"document"},
-	".mp3":     {"audio"},
-	".wav":     {"audio"},
-	".wma":     {"audio"},
-	".cda":     {"audio"},
-	".mov":     {"video"},
-	".wmv":     {"video"},
-	".mp4":     {"video"},
-	".avi":     {"video"},
-	".flv":     {"video"},
-	".h264":    {"video"},
-	".mpg":     {"video"},
-	".mpeg":    {"video"},
+	".mp3":     {"media", "audio"},
+	".wav":     {"media", "audio"},
+	".wma":     {"media", "audio"},
+	".cda":     {"media", "audio"},
+	".mov":     {"media", "video"},
+	".wmv":     {"media", "video"},
+	".mp4":     {"media", "video"},
+	".avi":     {"media", "video"},
+	".flv":     {"media", "video"},
+	".h264":    {"media", "video"},
+	".mpg":     {"media", "video"},
+	".mpeg":    {"media", "video"},
 	".zip":     {"archive"},
 	".tar":     {"archive"},
 	".gz":      {"archive"},
@@ -98,6 +98,7 @@ func indexLocalDirectory(database *sql.DB, pathToIndex string, tagCache map[stri
 		// first see if the file is already in the database
 		existingFile, _ := db.FindFileByAbsPath(database, filepath.Base(path), filepath.Dir(path))
 		if existingFile.Id == metadata.UnknownFile.Id {
+			// get count of files with that name
 			tags := inferTagsFromFile(path, tagCache)
 			_, err := db.CreateFileInPath(database, filepath.Base(path), filepath.Dir(path), tags)
 			if err != nil {
