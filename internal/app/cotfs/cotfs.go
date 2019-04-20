@@ -147,7 +147,7 @@ func (d *Dir) handleCrossDeviceLink(absDirPath string, fileName string) (fs.Node
 		// file already exists, just need to tag it
 		err = db.TagFile(d.database, info.Id, d.path)
 	}
-	return &File{fileInfo: info, storage: d.storageSystem}, err
+	return &File{fileInfo: info, storage: d.storageSystem, newSymlink: true}, err
 }
 
 // Handles creation of a link to a file that is already under management by cotfs by looking up the tags that correspond
@@ -180,7 +180,7 @@ func (d *Dir) handleWithinFSLink(absDirPath string, fileName string) (fs.Node, e
 	if err != nil {
 		return nil, err
 	}
-	return &File{fileInfo: files[0], storage: d.storageSystem}, nil
+	return &File{fileInfo: files[0], storage: d.storageSystem, newSymlink: true}, nil
 }
 
 // Converts an absolute directory path to an array of tag info objects
@@ -439,8 +439,9 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 }
 
 type File struct {
-	fileInfo metadata.FileInfo
-	storage  storage.FileStorage
+	fileInfo   metadata.FileInfo
+	storage    storage.FileStorage
+	newSymlink bool
 }
 
 var _ fs.Node = (*File)(nil)
@@ -453,7 +454,12 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	}
 
 	a.Size = uint64(stat.Size())
-	a.Mode = stat.Mode()
+	if f.newSymlink {
+		//  if we don't do this, we'll get an error from ln saying illegal argument when we link a file
+		a.Mode = stat.Mode() | os.ModeSymlink
+	} else {
+		a.Mode = stat.Mode()
+	}
 	a.Mtime = stat.ModTime()
 	a.Ctime = getCreateTime(stat)
 	a.Crtime = a.Ctime
@@ -482,6 +488,15 @@ var _ fs.HandleReleaser = (*FileHandle)(nil)
 
 func (fh *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	return fh.r.Close()
+}
+
+var _ = fs.NodeReadlinker(&File{})
+
+func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	// we convert any cached symlinks back to regular nodes
+	// TODO this works except where you try to open the linked file right after linking; fix that limitation
+	f.newSymlink = false
+	return "", nil
 }
 
 var _ = fs.HandleReader(&FileHandle{})
