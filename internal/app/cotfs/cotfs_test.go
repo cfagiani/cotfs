@@ -385,6 +385,59 @@ func TestDir_Symlink(t *testing.T) {
 	}
 }
 
+// Verifies we can read a file
+func TestFile_Open(t *testing.T) {
+	metaDb, storageSys := getMockFixtures(t)
+	defer metaDb.Close()
+	fileInfo := &File{
+		fileInfo: metadata.FileInfo{Name: "someName", Path: "somePath"},
+		storage:  storageSys,
+	}
+	fileHandle, err := fileInfo.Open(nil, nil, nil)
+	if err != nil {
+		t.Errorf("Could not open file: %v", err)
+	}
+	if fileHandle == nil {
+		t.Error("Got a nil file handle from open")
+	}
+
+	// ensure that file errors are propagated
+	fileInfo = &File{
+		fileInfo: metadata.FileInfo{Name: "thisWillERROR"},
+		storage:  storageSys,
+	}
+	_, err = fileInfo.Open(nil, nil, nil)
+	if err == nil {
+		t.Error("Expected and error from Open bug did not get one")
+	}
+}
+
+func TestFileHandle_Read(t *testing.T) {
+	metaDb, storageSys := getMockFixtures(t)
+	defer metaDb.Close()
+	fileInfo := &File{
+		fileInfo: metadata.FileInfo{Name: "someName", Path: "somePath"},
+		storage:  storageSys,
+	}
+	sizesToRead := []int{1, 5, 10, len(testContent), len(testContent) + 10}
+
+	for _, size := range sizesToRead {
+		fh, _ := fileInfo.Open(nil, nil, nil)
+		fileHandle := fh.(*FileHandle)
+		response := &fuse.ReadResponse{}
+		err := fileHandle.Read(nil, &fuse.ReadRequest{Size: size}, response)
+		if err != nil {
+			t.Errorf("Unexpected error reading file: %v", err)
+		}
+
+		if len(response.Data) != size {
+			t.Errorf("Expected data read to be %d bytes but was %d", size, len(response.Data))
+		}
+
+	}
+
+}
+
 // Verifies hard-linking works within the filesystem
 func TestDir_Link(t *testing.T) {
 	metaDb, storageSys := getMockFixtures(t)
@@ -609,7 +662,14 @@ func (f MockFile) Stat() (os.FileInfo, error) {
 
 func (MockFile) Close() error { return nil }
 func (MockFile) Read(p []byte) (n int, err error) {
-	return 0, nil
+	for idx, _ := range p {
+		if idx >= len(testContent) {
+			return len(testContent), nil
+		}
+		p[idx] = testContent[idx]
+
+	}
+	return len(p), nil
 }
 
 // FileInfo methods
