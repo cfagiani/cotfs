@@ -9,6 +9,7 @@ does not matter.
 
 For instance, a file with the following tags: photo, landscape, travel
 could be accessed at any of the below paths:
+```
 /photo/landscape/travel/
 /photo/travel/landscape/
 /travel/photo/landscape
@@ -24,6 +25,7 @@ could be accessed at any of the below paths:
 /travel
 /photo
 /landscape
+```
 
 ### Semantics
 
